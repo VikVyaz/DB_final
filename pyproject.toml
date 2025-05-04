@@ -9,6 +9,7 @@ readme = "README.md"
 python = "^3.12"
 dotenv = "^0.9.9"
 requests = "^2.32.3"
+pandas = "^2.2.3"
 
 
 [tool.poetry.group.linters.dependencies]
