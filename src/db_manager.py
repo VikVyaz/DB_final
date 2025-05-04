@@ -1,28 +1,27 @@
 # -*- coding: utf-8 -*-
-from src.api_handler import to_get_10_vacs
+from src.api_handler import to_get_10_employers
 import psycopg2
 from psycopg2 import sql
 from psycopg2.errors import UndefinedColumn, UndefinedTable, UniqueViolation, DuplicateTable
 from psycopg2.extras import RealDictCursor
+from src.vacancy_handler import VacHandler
+from src.abstract_cls import AbcDBManager
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
 
 
-class DBManager:
+class DBManager(AbcDBManager):
     """
     Класс работы с БД
     """
 
     def __init__(self, db_name: str):
-        if isinstance(db_name, str):
-            self.db_name = db_name
-        else:
-            raise TypeError('Доступно только в формате str')
-
+        self.db_name = db_name
         self.__conn = None
         self.__cur = None
+        self.db_exists = True
 
         self.__conn_params = {
             'host': "localhost",
@@ -37,20 +36,20 @@ class DBManager:
         try:
             self.__conn = psycopg2.connect(**self.__conn_params)
             self.__conn.autocommit = True
-            print(f'Подключено к {self.db_name}')
         except UnicodeDecodeError:
-            print(f'БД {self.db_name} не существует. Создаю..')
             self.__conn_params['dbname'] = 'postgres'
+            self.db_exists = False
+
             err_conn = psycopg2.connect(**self.__conn_params)
             err_conn.autocommit = True
             err_cur = err_conn.cursor()
             err_cur.execute(sql.SQL("create database {}").format(sql.Identifier(self.db_name)))
-            print('БД создана')
             err_cur.close()
             err_conn.close()
 
+            self.__conn_params['dbname'] = self.db_name
             self.__conn = psycopg2.connect(**self.__conn_params)
-            print(f'Подключено к {self.db_name}')
+            self.__conn.autocommit = True
 
         self.__cur = self.__conn.cursor(cursor_factory=RealDictCursor)
         return self
@@ -64,6 +63,7 @@ class DBManager:
             else:
                 self.__conn.rollback()
             self.__conn.close()
+            print('Соединение отключено')
 
     def to_update_db(self):
         """
@@ -108,6 +108,7 @@ class DBManager:
                 schedule VARCHAR,
                 vac_salary_from INT,
                 vac_salary_to INT,
+                vac_currency VARCHAR,
                 vac_avg_salary INT,
                 employer_id INT,
                 
@@ -117,20 +118,15 @@ class DBManager:
         """)
 
         print('Получение данных с HH.ru...')
-        vacancies = to_get_10_vacs()
+        api_response = to_get_10_employers()
         print('Данные получены.')
 
-        for vac in vacancies:
+        vacancies = VacHandler()
+
+        for vac in api_response:
             employer_field = vac['employer']
 
-            employer_id = int(employer_field['id'])
-            employer_name = employer_field['name']
-            comp_url = employer_field['alternate_url']
-            vacancies_url = employer_field['vacancies_url']
-            rating = float(
-                employer_field.get('employer_rating', {}).get('total_rating', None)) if employer_field[
-                'employer_rating'] else None
-            employer_trusted = employer_field['trusted']
+            emp_params = vacancies.to_give_emp_params(employer_field)
 
             comp_query = """
                         INSERT INTO employers 
@@ -138,35 +134,15 @@ class DBManager:
                         VALUES (%s, %s, %s, %s, %s, %s)
                         ON CONFLICT (employer_id) DO NOTHING;
                         """
-            comp_data = (employer_id, employer_name, comp_url, vacancies_url, rating, employer_trusted)
+            comp_data = (*emp_params,)
             cur.execute(comp_query, comp_data)
 
-            vacancy_id = int(vac['id'])
-            vacancy_name = vac['name']
-            city = vac['area']['name']
-            vacancy_url = vac['alternate_url']
-            schedule = vac['schedule']['name']
-
-            if vac['salary']:
-                vac_salary_from = vac['salary']['from']
-                vac_salary_to = vac['salary']['to']
-                if vac_salary_from and vac_salary_to:
-                    vac_avg_salary = (vac_salary_from + vac_salary_to) / 2
-                elif vac_salary_from:
-                    vac_avg_salary = vac_salary_from
-                else:
-                    vac_avg_salary = vac_salary_to
-            else:
-                vac_salary_from = None
-                vac_salary_to = None
-                vac_avg_salary = None
-
-            employer_id = int(vac['employer']['id'])
+            vac_params = vacancies.to_give_vac_params(vac, emp_params)
 
             query = """
                     INSERT INTO vacancies (vacancy_id, vacancy_name, city, vacancy_url, schedule, vac_salary_from,
-                    vac_salary_to, vac_avg_salary, employer_id)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    vac_salary_to, vac_currency, vac_avg_salary, employer_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (vacancy_id) DO UPDATE SET
                     vacancy_name = EXCLUDED.vacancy_name,
                     city = EXCLUDED.city,
@@ -174,14 +150,15 @@ class DBManager:
                     schedule = EXCLUDED.schedule,
                     vac_salary_from = EXCLUDED.vac_salary_from,
                     vac_salary_to = EXCLUDED.vac_salary_to,
+                    vac_currency = EXCLUDED.vac_currency,
                     vac_avg_salary = EXCLUDED.vac_avg_salary,
                     employer_id = EXCLUDED.employer_id;
                     """
-            vacancy_data = (vacancy_id, vacancy_name, city, vacancy_url, schedule, vac_salary_from, vac_salary_to,
-                            vac_avg_salary, employer_id)
+            vacancy_data = (*vac_params,)
+
             cur.execute(query, vacancy_data)
 
-    def get_companies_and_vacancies_count(self):
+    def get_companies_and_vacancies_count(self) -> list:
         """
         Метод получения списка всех компаний и кол-ва их вакансий
         """
@@ -196,7 +173,7 @@ class DBManager:
 
         return [dict(row) for row in self.__cur.fetchall()]
 
-    def get_all_vacancies(self):
+    def get_all_vacancies(self) -> list:
         """
         Метод получения всех вакансий с указанием
         названия компании, названия вакансии, зп и ссылки на нее
@@ -210,7 +187,7 @@ class DBManager:
 
         return [dict(row) for row in self.__cur.fetchall()]
 
-    def get_avg_salary(self):
+    def get_avg_salary(self) -> dict:
         """
         Метод получения средней зп по вакансиям
         """
@@ -222,9 +199,10 @@ class DBManager:
 
         avg_salary = self.__cur.fetchall()
         avg_salary[0]['average_salary'] = round(float(avg_salary[0]['average_salary']), 2)
+
         return dict(avg_salary[0])
 
-    def get_vacancies_with_higher_salary(self):
+    def get_vacancies_with_higher_salary(self) -> list:
         """
         Метод получения списка вакансий, зп которых выше среднего по вакансиям
         """
@@ -239,7 +217,7 @@ class DBManager:
 
         return [dict(row) for row in self.__cur.fetchall()]
 
-    def get_vacancies_with_keyword(self, keyword: str):
+    def get_vacancies_with_keyword(self, keyword: str) -> list | None:
         """
         Метод получения всех вакансий по ключевому слову
         """
@@ -252,17 +230,14 @@ class DBManager:
                 ILIKE %s;""", (f'%{keyword}%',))
 
             return [dict(row) for row in self.__cur.fetchall()]
-        else:
-            print('Ключевое слово должно быть в формате str')
-
-
 
 # if __name__ == '__main__':
-    # with DBManager('testdb') as db:
-    # db.to_update_db()
-    # print(type(db.get_companies_and_vacancies_count()[0]))
-    # print(db.get_companies_and_vacancies_count())
-    # print(db.get_all_vacancies())
-    # print(db.get_avg_salary())
-    # print(db.get_vacancies_with_higher_salary())
-    # print(db.get_vacancies_with_keyword('Матрос'))
+#     with DBManager('testdb') as db:
+# print('Проверка связи')
+# db.to_update_db()
+# print(type(db.get_companies_and_vacancies_count()[0]))
+# print(db.get_companies_and_vacancies_count())
+# print(db.get_all_vacancies())
+# print(db.get_avg_salary())
+# print(db.get_vacancies_with_higher_salary())
+# print("-----", db.get_vacancies_with_keyword('чат'))

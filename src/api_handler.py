@@ -2,7 +2,7 @@ import requests
 from time import sleep
 
 
-def to_get_10_vacs():
+def to_get_10_employers():
     """
     Получение 10 самых свежих вакансий с HH
     """
@@ -16,7 +16,8 @@ def to_get_10_vacs():
     response.raise_for_status()
     vacancies = response.json()["items"]
     for vac in vacancies:
-        company_id.append(vac['employer']['id'])
+        if vac.get('employer', {}).get('id', False):
+            company_id.append(vac['employer']['id'])
     response.close()
 
     all_vacs = []
@@ -33,6 +34,6 @@ def to_get_10_vacs():
 
     return all_vacs
 
-
-if __name__ == '__main__':
-    print(to_get_10_vacs())
+#
+# if __name__ == '__main__':
+#     print(to_get_10_vacs())
